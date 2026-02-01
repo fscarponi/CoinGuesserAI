@@ -191,7 +191,7 @@ const VolumeOffIcon = () => (
 const SettingsIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 0 24 24" width="24px" fill="currentColor">
     <path d="M0 0h24v24H0V0z" fill="none"/>
-    <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L5.09 9.66c-.12.2-.07.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .43-.17.47-.41l.36-2.54c.59-.24 1.13-.57 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+    <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
   </svg>
 );
 
@@ -228,6 +228,8 @@ const App = () => {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: "environment", // Use rear camera
+            width: { ideal: 1920 }, // Try to get high res stream source before cropping
+            height: { ideal: 1080 }
           },
         });
         if (videoRef.current) {
@@ -314,31 +316,50 @@ const App = () => {
       // Initialize AI with the specific key for this request
       const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
 
-      // 1. Capture Frame
+      // 1. Capture & Optimize Frame (The "Image Diet")
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+
+      // Determine square crop dimensions (center crop)
+      const minDim = Math.min(video.videoWidth, video.videoHeight);
+      const startX = (video.videoWidth - minDim) / 2;
+      const startY = (video.videoHeight - minDim) / 2;
+      
+      // Sweet Spot Resolution: max 1024px
+      const targetSize = Math.min(minDim, 1024);
+
+      canvas.width = targetSize;
+      canvas.height = targetSize;
+      
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context missing");
 
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const base64Data = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+      // Draw cropped and resized image
+      ctx.drawImage(
+        video, 
+        startX, startY, minDim, minDim, // Source: Center square crop
+        0, 0, targetSize, targetSize    // Destination: Resize to target
+      );
 
-      // 2. Prepare API Request
+      // Export as JPEG with 75% quality (Balance quality/size)
+      const base64Data = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
+
+      // 2. Prepare API Request (Few-Shot Prompting)
       const modelId = "gemini-3-flash-preview";
-      const systemPrompt = `Sei un'interfaccia API di scansione numismatica ultra-veloce. Il tuo unico compito è identificare monete da immagini o flussi video.
+      const systemPrompt = `Sei un esperto numismatico. Analizza la moneta nell'immagine.
+
+ESEMPI:
+[Foto di 2 Euro] -> Italia | 2 Euro | 2002
+[Foto di 1 Quarter] -> USA | 1 Quarter Dollar | 1998
+[Foto illeggibile] -> ? | ? | ?
 
 REGOLE DI RISPOSTA:
-1. Analizza ogni moneta presente nell'immagine.
-2. Per ogni moneta, restituisci ESCLUSIVAMENTE una riga nel formato: [NAZIONE] | [VALORE NOMINALE] | [ANNO]
-3. Se ci sono più monete, usa un elenco puntato.
-4. NON aggiungere introduzioni ("Ecco i risultati"), conclusioni o descrizioni del metallo/stato.
-5. Se un dato è illeggibile, scrivi [?] al suo posto (es: Italia | 500 Lire | [?]).
-6. Se l'immagine non contiene monete, rispondi: "Nessuna moneta rilevata".
-7. Dai priorità assoluta alla precisione della nazione e del valore.`;
+- Rispondi SOLO nel formato: NAZIONE | VALORE | ANNO
+- Se ci sono più monete, usa un elenco puntato.
+- Se un dato è illeggibile, usa [?]
+- Se non ci sono monete: "Nessuna moneta rilevata".`;
 
-      // 3. Call API
+      // 3. Call API (Technical Params Optimization)
       const response = await ai.models.generateContent({
         model: modelId,
         contents: {
@@ -350,13 +371,15 @@ REGOLE DI RISPOSTA:
               },
             },
             {
-              text: "Analizza la moneta e rispondi solo con: NAZIONE | VALORE | ANNO",
+              text: "Analizza la moneta.", // Simple trigger
             },
           ],
         },
         config: {
           systemInstruction: systemPrompt,
-          temperature: 0.2, // Low temperature for factual precision
+          temperature: 0.1, // High precision
+          topP: 0.8,        // Focused sampling
+          thinkingConfig: { thinkingBudget: 0 } // Minimal thinking (Fastest)
         },
       });
 
@@ -401,6 +424,7 @@ REGOLE DI RISPOSTA:
       let msg = "Errore scansione.";
       if (err.message && err.message.includes("API Key")) msg = err.message;
       else if (err.toString().includes("403")) msg = "API Key non valida.";
+      else if (err.toString().includes("503")) msg = "Servizio momentaneamente non disponibile.";
       setError(msg);
       speakResult("Errore.");
     } finally {
